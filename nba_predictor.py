@@ -115,100 +115,126 @@ class NBAPredictor:
 
     def get_todays_games(self) -> List[Dict]:
         """
-        Fetch today's NBA games using direct HTTP request to bypass library issues
+        Fetch today's NBA games using the nba_api library
 
         Returns:
             List of game dictionaries with team information
         """
         try:
-            today = datetime.now().strftime('%m/%d/%Y')  # NBA API uses MM/DD/YYYY format
+            # Use nba_api's built-in method which handles authentication better
+            today = datetime.now()
 
-            # Make direct HTTP request to NBA Stats API
-            url = "https://stats.nba.com/stats/scoreboardv2"
+            # Format date as YYYY-MM-DD for nba_api
+            date_str = today.strftime('%Y-%m-%d')
 
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json',
-                'Referer': 'https://www.nba.com/',
-                'Origin': 'https://www.nba.com',
-                'x-nba-stats-origin': 'stats',
-                'x-nba-stats-token': 'true'
-            }
+            print(f"Fetching games for {date_str}...")
 
-            params = {
-                'GameDate': today,
-                'LeagueID': '00',
-                'DayOffset': '0'
-            }
+            # Use nba_api's scoreboardv2 endpoint
+            scoreboard = scoreboardv2.ScoreboardV2(game_date=date_str)
+            game_header_df = scoreboard.get_data_frames()[0]
 
-            print(f"Fetching games for {today}...")
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-
-            if response.status_code != 200:
-                print(f"HTTP Error: {response.status_code}")
+            if game_header_df.empty:
+                print(f"No games found for {date_str}")
                 return []
 
-            data = response.json()
-
-            # Navigate to GameHeader result set
-            if 'resultSets' not in data:
-                print("No resultSets in API response")
-                return []
-
-            game_header = None
-            for result_set in data['resultSets']:
-                if result_set.get('name') == 'GameHeader':
-                    game_header = result_set
-                    break
-
-            if not game_header:
-                print("No GameHeader found in response")
-                return []
-
-            headers_list = game_header.get('headers', [])
-            rows = game_header.get('rowSet', [])
-
-            if not rows:
-                print(f"No games found for {today}")
-                return []
-
-            # Find column indices
-            try:
-                game_id_idx = headers_list.index('GAME_ID')
-                home_team_idx = headers_list.index('HOME_TEAM_ID')
-                visitor_team_idx = headers_list.index('VISITOR_TEAM_ID')
-                status_idx = headers_list.index('GAME_STATUS_TEXT') if 'GAME_STATUS_TEXT' in headers_list else None
-            except ValueError as e:
-                print(f"Missing required column: {e}")
-                print(f"Available columns: {headers_list}")
-                return []
-
-            # Parse games
+            # Parse games from DataFrame
             games = []
-            for row in rows:
-                try:
-                    games.append({
-                        'game_id': row[game_id_idx],
-                        'home_team': row[home_team_idx],
-                        'away_team': row[visitor_team_idx],
-                        'game_time': row[status_idx] if status_idx is not None else 'TBD'
-                    })
-                except (IndexError, TypeError) as e:
-                    print(f"Error parsing game row: {e}")
-                    continue
+            for _, row in game_header_df.iterrows():
+                games.append({
+                    'game_id': row['GAME_ID'],
+                    'home_team': row['HOME_TEAM_ID'],
+                    'away_team': row['VISITOR_TEAM_ID'],
+                    'game_time': row.get('GAME_STATUS_TEXT', 'TBD')
+                })
 
             print(f"✓ Found {len(games)} games")
             return games
 
-        except requests.exceptions.RequestException as e:
-            print(f"Network error fetching games: {e}")
-            return []
         except Exception as e:
             print(f"Error fetching today's games: {e}")
             print(f"Error type: {type(e).__name__}")
-            import traceback
-            traceback.print_exc()
+
+            # Try fallback with direct HTTP request with improved headers
+            try:
+                print("Trying fallback method with direct HTTP request...")
+                return self._get_games_direct_http()
+            except Exception as fallback_error:
+                print(f"Fallback also failed: {fallback_error}")
+                import traceback
+                traceback.print_exc()
+                return []
+
+    def _get_games_direct_http(self) -> List[Dict]:
+        """
+        Fallback method to fetch games using direct HTTP request with improved headers
+
+        Returns:
+            List of game dictionaries
+        """
+        today = datetime.now().strftime('%m/%d/%Y')
+
+        # More complete browser-like headers
+        headers = {
+            'Host': 'stats.nba.com',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.nba.com/',
+            'Origin': 'https://www.nba.com',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+        }
+
+        params = {
+            'GameDate': today,
+            'LeagueID': '00',
+            'DayOffset': '0'
+        }
+
+        url = "https://stats.nba.com/stats/scoreboardv2"
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if response.status_code != 200:
+            print(f"HTTP Error: {response.status_code} - {response.text[:200]}")
             return []
+
+        data = response.json()
+
+        # Parse response
+        if 'resultSets' not in data:
+            return []
+
+        game_header = next((rs for rs in data['resultSets'] if rs.get('name') == 'GameHeader'), None)
+        if not game_header:
+            return []
+
+        headers_list = game_header.get('headers', [])
+        rows = game_header.get('rowSet', [])
+
+        if not rows:
+            return []
+
+        # Find indices
+        game_id_idx = headers_list.index('GAME_ID')
+        home_team_idx = headers_list.index('HOME_TEAM_ID')
+        visitor_team_idx = headers_list.index('VISITOR_TEAM_ID')
+        status_idx = headers_list.index('GAME_STATUS_TEXT') if 'GAME_STATUS_TEXT' in headers_list else None
+
+        # Build games list
+        games = []
+        for row in rows:
+            games.append({
+                'game_id': row[game_id_idx],
+                'home_team': row[home_team_idx],
+                'away_team': row[visitor_team_idx],
+                'game_time': row[status_idx] if status_idx is not None else 'TBD'
+            })
+
+        print(f"✓ Found {len(games)} games via fallback")
+        return games
 
     def get_player_recent_stats(self, player_id: int, num_games: int = None) -> pd.DataFrame:
         """
