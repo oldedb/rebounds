@@ -22,19 +22,24 @@ class ESPNNBAClient:
 
     BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
 
-    def __init__(self, use_mock_data: bool = False):
+    def __init__(self, use_mock_data: bool = False, override_date: Optional[str] = None):
         """
         Initialize ESPN NBA API client
 
         Args:
             use_mock_data: If True, use mock data instead of making API calls
+            override_date: Override system date (format: YYYY-MM-DD). If None, uses system date.
         """
         self.use_mock_data = use_mock_data or os.environ.get('USE_MOCK_DATA') == 'true'
+        self.override_date = override_date or os.environ.get('NBA_DATE_OVERRIDE')
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/json',
             'Referer': 'https://www.espn.com/',
         }
+
+        if self.override_date:
+            print(f"📅 Using date override: {self.override_date}")
 
     def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """
@@ -82,7 +87,14 @@ class ESPNNBAClient:
         if self.use_mock_data:
             return self._get_mock_todays_games()
 
-        data = self._make_request("scoreboard")
+        # Build parameters with date override if specified
+        params = {}
+        if self.override_date:
+            # ESPN API expects date in YYYYMMDD format
+            date_formatted = self.override_date.replace('-', '')
+            params['dates'] = date_formatted
+
+        data = self._make_request("scoreboard", params=params)
 
         if not data:
             return []

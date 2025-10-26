@@ -46,16 +46,18 @@ class PlayerPrediction:
 class NBAPredictor:
     """Analyzes NBA games and predicts player rebounding performance"""
 
-    def __init__(self, recent_games: int = 5, use_mock_data: bool = None):
+    def __init__(self, recent_games: int = 5, use_mock_data: bool = None, override_date: str = None):
         """
         Initialize the NBA predictor
 
         Args:
             recent_games: Number of recent games to analyze for trends (default: 5)
             use_mock_data: If True, use mock data. If None, auto-detect based on environment
+            override_date: Override system date (format: YYYY-MM-DD). Useful when system clock is wrong.
         """
         self.recent_games = recent_games
         self.current_season = self._get_current_season()
+        self.override_date = override_date or os.environ.get('NBA_DATE_OVERRIDE')
 
         # Auto-enable mock data in restricted environments or if explicitly requested
         if use_mock_data is None:
@@ -64,7 +66,7 @@ class NBAPredictor:
             self.use_mock_data = use_mock_data
 
         # Initialize ESPN API client
-        self.espn_client = ESPNNBAClient(use_mock_data=self.use_mock_data)
+        self.espn_client = ESPNNBAClient(use_mock_data=self.use_mock_data, override_date=self.override_date)
 
         if self.use_mock_data:
             print("ℹ️  Running in MOCK DATA mode for testing")

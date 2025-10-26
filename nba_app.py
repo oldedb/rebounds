@@ -95,16 +95,35 @@ show_neutral = st.sidebar.checkbox(
 
 st.sidebar.markdown("---")
 
-# Initialize predictor
-@st.cache_resource(hash_funcs={int: lambda x: x})
-def get_predictor(num_games, _cache_version=2):  # Increment version to bust cache
-    return NBAPredictor(recent_games=num_games)
-
-predictor = get_predictor(recent_games, _cache_version=2)
-
-# Main content
+# Date override option
 st.sidebar.markdown("### 📅 Analysis Date")
-st.sidebar.info(f"**{datetime.now().strftime('%B %d, %Y')}**")
+
+use_custom_date = st.sidebar.checkbox(
+    "Override System Date",
+    value=False,
+    help="Use this if the system date is incorrect"
+)
+
+if use_custom_date:
+    custom_date = st.sidebar.date_input(
+        "Select Date",
+        value=datetime.now(),
+        help="Choose the date to analyze games for"
+    )
+    override_date_str = custom_date.strftime('%Y-%m-%d')
+    st.sidebar.success(f"Using: {custom_date.strftime('%B %d, %Y')}")
+else:
+    override_date_str = None
+    st.sidebar.info(f"System: {datetime.now().strftime('%B %d, %Y')}")
+
+# Initialize predictor
+@st.cache_resource(hash_funcs={int: lambda x: x, type(None): lambda x: 0})
+def get_predictor(num_games, override_date, _cache_version=3):  # Increment version to bust cache
+    return NBAPredictor(recent_games=num_games, override_date=override_date)
+
+predictor = get_predictor(recent_games, override_date_str, _cache_version=3)
+
+st.sidebar.markdown("---")
 
 analyze_button = st.sidebar.button("🔍 Analyze Today's Games", type="primary", use_container_width=True)
 
