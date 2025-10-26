@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-NBA Rebound Prediction Module
+NBA Rebound Prediction Module - ESPN API Version
 
 Analyzes today's NBA matchups and predicts player rebounding performance
 based on recent trends and opposing team defensive strength.
+
+This version uses ESPN API (with mock data fallback) instead of NBA Stats API.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import statistics
 from dataclasses import dataclass
-from nba_api.stats.endpoints import (
-    scoreboardv2,
-    playergamelogs,
-    leaguedashteamstats,
-    commonplayerinfo,
-    leaguegamefinder
+import os
+
+# Import our new ESPN API client and mock data
+from espn_api import ESPNNBAClient
+from mock_nba_data import (
+    generate_recent_game_stats,
+    get_mock_player_by_team,
+    get_mock_team_stats,
+    get_all_mock_players
 )
-from nba_api.stats.static import players, teams
-import pandas as pd
-import requests
-import json
 
 
 @dataclass
@@ -45,15 +46,28 @@ class PlayerPrediction:
 class NBAPredictor:
     """Analyzes NBA games and predicts player rebounding performance"""
 
-    def __init__(self, recent_games: int = 5):
+    def __init__(self, recent_games: int = 5, use_mock_data: bool = None):
         """
         Initialize the NBA predictor
 
         Args:
             recent_games: Number of recent games to analyze for trends (default: 5)
+            use_mock_data: If True, use mock data. If None, auto-detect based on environment
         """
         self.recent_games = recent_games
         self.current_season = self._get_current_season()
+
+        # Auto-enable mock data in restricted environments or if explicitly requested
+        if use_mock_data is None:
+            self.use_mock_data = os.environ.get('USE_MOCK_DATA', 'true').lower() == 'true'
+        else:
+            self.use_mock_data = use_mock_data
+
+        # Initialize ESPN API client
+        self.espn_client = ESPNNBAClient(use_mock_data=self.use_mock_data)
+
+        if self.use_mock_data:
+            print("ℹ️  Running in MOCK DATA mode for testing")
 
     def _get_current_season(self) -> str:
         """Get current NBA season string (e.g., '2024-25')"""
@@ -63,261 +77,22 @@ class NBAPredictor:
         else:
             return f"{today.year - 1}-{str(today.year)[-2:]}"
 
-    def diagnose_api(self) -> None:
-        """
-        Diagnostic function to check NBA API connectivity and data availability
-        Useful for troubleshooting
-        """
-        print("=" * 60)
-        print("NBA API Diagnostics")
-        print("=" * 60)
-
-        # Check today's date
-        today = datetime.now().strftime('%Y-%m-%d')
-        print(f"\n1. Today's Date: {today}")
-        print(f"   Current Season: {self.current_season}")
-
-        # Try to fetch scoreboard
-        print(f"\n2. Fetching scoreboard for {today}...")
-        try:
-            scoreboard = scoreboardv2.ScoreboardV2(game_date=today)
-            dfs = scoreboard.get_data_frames()
-            print(f"   ✓ Success! Found {len(dfs)} DataFrames")
-
-            for i, df in enumerate(dfs):
-                print(f"\n   DataFrame {i}:")
-                print(f"     - Rows: {len(df)}")
-                print(f"     - Columns: {list(df.columns)[:10]}...")  # First 10 columns
-                if 'GAME_ID' in df.columns:
-                    print(f"     - Contains GAME_ID ✓")
-                    print(f"     - Unique games: {df['GAME_ID'].nunique() if not df.empty else 0}")
-
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-
-        # Try to get active players
-        print(f"\n3. Testing player data access...")
-        try:
-            all_players = players.get_active_players()
-            print(f"   ✓ Found {len(all_players)} active players")
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-
-        # Try to get teams
-        print(f"\n4. Testing team data access...")
-        try:
-            all_teams = teams.get_teams()
-            print(f"   ✓ Found {len(all_teams)} teams")
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-
-        print("\n" + "=" * 60)
-
     def get_todays_games(self) -> List[Dict]:
         """
-        Fetch today's NBA games using the nba_api library
+        Fetch today's NBA games
 
         Returns:
             List of game dictionaries with team information
         """
-        try:
-            # Use nba_api's built-in method which handles authentication better
-            today = datetime.now()
+        games = self.espn_client.get_todays_games()
 
-            # Format date as YYYY-MM-DD for nba_api
-            date_str = today.strftime('%Y-%m-%d')
+        if not games and not self.use_mock_data:
+            print("⚠️  No games from API, switching to mock data")
+            self.use_mock_data = True
+            self.espn_client.use_mock_data = True
+            games = self.espn_client.get_todays_games()
 
-            print(f"Fetching games for {date_str}...")
-
-            # Use nba_api's scoreboardv2 endpoint
-            scoreboard = scoreboardv2.ScoreboardV2(game_date=date_str)
-            game_header_df = scoreboard.get_data_frames()[0]
-
-            if game_header_df.empty:
-                print(f"No games found for {date_str}")
-                return []
-
-            # Parse games from DataFrame
-            games = []
-            for _, row in game_header_df.iterrows():
-                games.append({
-                    'game_id': row['GAME_ID'],
-                    'home_team': row['HOME_TEAM_ID'],
-                    'away_team': row['VISITOR_TEAM_ID'],
-                    'game_time': row.get('GAME_STATUS_TEXT', 'TBD')
-                })
-
-            print(f"✓ Found {len(games)} games")
-            return games
-
-        except Exception as e:
-            print(f"Error fetching today's games: {e}")
-            print(f"Error type: {type(e).__name__}")
-
-            # Try fallback with direct HTTP request with improved headers
-            try:
-                print("Trying fallback method with direct HTTP request...")
-                return self._get_games_direct_http()
-            except Exception as fallback_error:
-                print(f"Fallback also failed: {fallback_error}")
-                import traceback
-                traceback.print_exc()
-                return []
-
-    def _get_games_direct_http(self) -> List[Dict]:
-        """
-        Fallback method to fetch games using direct HTTP request with improved headers
-
-        Returns:
-            List of game dictionaries
-        """
-        today = datetime.now().strftime('%m/%d/%Y')
-
-        # More complete browser-like headers
-        headers = {
-            'Host': 'stats.nba.com',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.nba.com/',
-            'Origin': 'https://www.nba.com',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
-        }
-
-        params = {
-            'GameDate': today,
-            'LeagueID': '00',
-            'DayOffset': '0'
-        }
-
-        url = "https://stats.nba.com/stats/scoreboardv2"
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-
-        if response.status_code != 200:
-            print(f"HTTP Error: {response.status_code} - {response.text[:200]}")
-            return []
-
-        data = response.json()
-
-        # Parse response
-        if 'resultSets' not in data:
-            return []
-
-        game_header = next((rs for rs in data['resultSets'] if rs.get('name') == 'GameHeader'), None)
-        if not game_header:
-            return []
-
-        headers_list = game_header.get('headers', [])
-        rows = game_header.get('rowSet', [])
-
-        if not rows:
-            return []
-
-        # Find indices
-        game_id_idx = headers_list.index('GAME_ID')
-        home_team_idx = headers_list.index('HOME_TEAM_ID')
-        visitor_team_idx = headers_list.index('VISITOR_TEAM_ID')
-        status_idx = headers_list.index('GAME_STATUS_TEXT') if 'GAME_STATUS_TEXT' in headers_list else None
-
-        # Build games list
-        games = []
-        for row in rows:
-            games.append({
-                'game_id': row[game_id_idx],
-                'home_team': row[home_team_idx],
-                'away_team': row[visitor_team_idx],
-                'game_time': row[status_idx] if status_idx is not None else 'TBD'
-            })
-
-        print(f"✓ Found {len(games)} games via fallback")
         return games
-
-    def get_player_recent_stats(self, player_id: int, num_games: int = None) -> pd.DataFrame:
-        """
-        Get recent game stats for a player
-
-        Args:
-            player_id: NBA player ID
-            num_games: Number of recent games (defaults to self.recent_games)
-
-        Returns:
-            DataFrame with recent game statistics
-        """
-        if num_games is None:
-            num_games = self.recent_games
-
-        try:
-            game_logs = playergamelogs.PlayerGameLogs(
-                season_nullable=self.current_season,
-                player_id_nullable=player_id,
-                season_type_nullable='Regular Season'
-            )
-            df = game_logs.get_data_frames()[0]
-
-            if df.empty:
-                return pd.DataFrame()
-
-            # Sort by date and take most recent games
-            df = df.sort_values('GAME_DATE', ascending=False).head(num_games)
-            return df
-
-        except Exception as e:
-            print(f"Error fetching player stats for {player_id}: {e}")
-            return pd.DataFrame()
-
-    def get_team_defensive_stats(self, team_id: int) -> Dict:
-        """
-        Get team's defensive and pace statistics
-
-        Args:
-            team_id: NBA team ID
-
-        Returns:
-            Dictionary with defensive stats, pace, and shooting percentages
-        """
-        try:
-            team_stats = leaguedashteamstats.LeagueDashTeamStats(
-                season=self.current_season,
-                season_type_all_star='Regular Season'
-            )
-            df = team_stats.get_data_frames()[0]
-
-            team_data = df[df['TEAM_ID'] == team_id]
-
-            if team_data.empty:
-                return {}
-
-            row = team_data.iloc[0]
-            games_played = max(row.get('GP', 1), 1)
-
-            # Calculate opponent FG% (lower = more missed shots = more rebounds)
-            opp_fgm = row.get('OPP_FGM', 0)
-            opp_fga = row.get('OPP_FGA', 1)
-            opp_fg_pct = (opp_fgm / opp_fga * 100) if opp_fga > 0 else 45.0
-
-            # Calculate opponent 3PA per game (more 3s = longer rebounds)
-            opp_fg3a = row.get('OPP_FG3A', 0)
-            opp_fg3a_per_game = opp_fg3a / games_played
-
-            return {
-                'def_rating': row.get('DEF_RATING', 0),
-                'opp_reb': row.get('OPP_REB', 0),
-                'games_played': games_played,
-                'def_reb': row.get('DREB', 0),
-                'opp_reb_per_game': row.get('OPP_REB', 0) / games_played,
-                'pace': row.get('PACE', 0),  # Possessions per 48 minutes
-                'opp_fg_pct': opp_fg_pct,  # Opponent field goal percentage
-                'opp_fga_per_game': opp_fga / games_played,  # Opponent shot attempts per game
-                'opp_fg3a_per_game': opp_fg3a_per_game,  # Opponent 3PA per game
-            }
-
-        except Exception as e:
-            print(f"Error fetching team defensive stats: {e}")
-            return {}
 
     def calculate_rebound_trend(self, rebounds: List[float]) -> Tuple[str, float]:
         """
@@ -355,50 +130,50 @@ class NBAPredictor:
 
     def predict_player_performance(
         self,
-        player_id: int,
-        player_name: str,
-        team_abbr: str,
-        opponent_id: int,
+        player: Dict,
+        opponent_id: str,
         opponent_abbr: str
     ) -> Optional[PlayerPrediction]:
         """
         Predict if a player will over/under perform their rebound average
 
         Args:
-            player_id: NBA player ID
-            player_name: Player's name
-            team_abbr: Player's team abbreviation
+            player: Player dictionary with stats
             opponent_id: Opposing team ID
             opponent_abbr: Opposing team abbreviation
 
         Returns:
             PlayerPrediction object or None if insufficient data
         """
-        # Get player's recent stats
-        recent_df = self.get_player_recent_stats(player_id, num_games=self.recent_games)
-        season_df = self.get_player_recent_stats(player_id, num_games=50)  # Full season
-
-        if recent_df.empty or season_df.empty:
-            return None
-
-        # Calculate averages
-        recent_rebounds = recent_df['REB'].tolist()
-        recent_avg = statistics.mean(recent_rebounds)
-        season_avg = statistics.mean(season_df['REB'].tolist())
+        player_name = player['name']
+        team_abbr = player['team_abbr']
+        season_avg = player['season_avg_reb']
 
         # Skip players with very low rebound numbers (not relevant)
         if season_avg < 3.0:
             return None
 
-        # Calculate trend
-        recent_rebounds.reverse()  # Oldest to newest for trend calculation
+        # Get recent game stats
+        recent_games = generate_recent_game_stats(player['id'], num_games=self.recent_games)
+
+        if not recent_games:
+            return None
+
+        # Calculate recent average
+        recent_rebounds = [game['rebounds'] for game in recent_games]
+        recent_avg = statistics.mean(recent_rebounds)
+
+        # Calculate trend (oldest to newest)
         trend, slope = self.calculate_rebound_trend(recent_rebounds)
 
         # Get opponent defensive stats
-        opp_def = self.get_team_defensive_stats(opponent_id)
+        opp_stats = get_mock_team_stats(opponent_id)
 
-        if not opp_def:
-            return None
+        opp_def_rating = opp_stats.get('defensive_rating', 112.0)
+        opp_reb_allowed = opp_stats.get('rebounds_allowed_per_game', 44.5)
+        opp_pace = opp_stats.get('pace', 100.0)
+        opp_fg_pct = opp_stats.get('opp_fg_pct', 46.0)
+        opp_fga_per_game = opp_stats.get('opp_fga_per_game', 88.0)
 
         # Make prediction
         reasoning = []
@@ -428,11 +203,6 @@ class NBAPredictor:
             reasoning.append(f"Rebounding trending downward ({slope:.2f} per game)")
 
         # Factor 3: Opponent defensive strength
-        # Lower defensive rating = better defense (harder to get rebounds)
-        # League average is around 112-114
-        opp_def_rating = opp_def.get('def_rating', 113)
-        opp_reb_allowed = opp_def.get('opp_reb_per_game', 45)
-
         if opp_def_rating > 115:
             score += 1
             reasoning.append(f"Opponent has weak defense (rating: {opp_def_rating:.1f})")
@@ -448,9 +218,7 @@ class NBAPredictor:
             score -= 1
             reasoning.append(f"Opponent limits rebounds ({opp_reb_allowed:.1f} per game)")
 
-        # Factor 5: Pace (more possessions = more rebounding opportunities)
-        # League average pace is around 99-101
-        opp_pace = opp_def.get('pace', 100)
+        # Factor 5: Pace
         if opp_pace > 102:
             score += 1
             reasoning.append(f"High pace game ({opp_pace:.1f} possessions/48min = more opportunities)")
@@ -458,9 +226,7 @@ class NBAPredictor:
             score -= 1
             reasoning.append(f"Low pace game ({opp_pace:.1f} possessions/48min = fewer opportunities)")
 
-        # Factor 6: Opponent FG% (lower shooting = more missed shots = more rebounds)
-        # League average FG% is around 46-47%
-        opp_fg_pct = opp_def.get('opp_fg_pct', 46.5)
+        # Factor 6: Opponent FG%
         if opp_fg_pct < 44.5:
             score += 1
             reasoning.append(f"Opponent shoots poorly ({opp_fg_pct:.1f}% FG = more missed shots)")
@@ -468,8 +234,7 @@ class NBAPredictor:
             score -= 1
             reasoning.append(f"Opponent shoots well ({opp_fg_pct:.1f}% FG = fewer missed shots)")
 
-        # Factor 7: Shot volume (more shots = more rebound opportunities)
-        opp_fga_per_game = opp_def.get('opp_fga_per_game', 88)
+        # Factor 7: Shot volume
         if opp_fga_per_game > 90:
             score += 1
             reasoning.append(f"High shot volume ({opp_fga_per_game:.1f} FGA/game = more opportunities)")
@@ -505,42 +270,6 @@ class NBAPredictor:
             reasoning=reasoning
         )
 
-    def get_top_players_by_team(self, team_id: int, top_n: int = 5) -> List[Dict]:
-        """
-        Get top rebounders from a team
-
-        Args:
-            team_id: NBA team ID
-            top_n: Number of top players to return
-
-        Returns:
-            List of player dictionaries
-        """
-        try:
-            # Get team's recent games to find active players
-            game_finder = leaguegamefinder.LeagueGameFinder(
-                team_id_nullable=team_id,
-                season_nullable=self.current_season,
-                season_type_nullable='Regular Season'
-            )
-            games_df = game_finder.get_data_frames()[0]
-
-            if games_df.empty:
-                return []
-
-            # Get unique players and their stats
-            # This is a simplified approach - in production you'd want more sophisticated logic
-            all_players = players.get_players()
-            team_players = [p for p in all_players if p.get('is_active', False)]
-
-            # For simplicity, return a subset
-            # In production, you'd query individual player stats to rank them
-            return team_players[:top_n]
-
-        except Exception as e:
-            print(f"Error getting top players: {e}")
-            return []
-
     def analyze_todays_matchups(self) -> List[PlayerPrediction]:
         """
         Analyze all of today's games and generate predictions
@@ -556,79 +285,36 @@ class NBAPredictor:
             print("No games scheduled for today")
             return []
 
-        all_teams = teams.get_teams()
-        team_dict = {t['id']: t for t in all_teams}
+        print(f"Analyzing {len(games)} games...")
 
         for game in games:
-            home_id = game['home_team']
-            away_id = game['away_team']
+            home_id = game['home_team']['id']
+            away_id = game['away_team']['id']
+            home_abbr = game['home_team']['abbreviation']
+            away_abbr = game['away_team']['abbreviation']
 
-            home_team = team_dict.get(home_id, {})
-            away_team = team_dict.get(away_id, {})
+            # Get players for both teams
+            home_players = get_mock_player_by_team(home_id)
+            away_players = get_mock_player_by_team(away_id)
 
-            # Get top rebounders from both teams
-            # Note: This is simplified. In production, you'd have a database
-            # of key players or use more sophisticated filtering
+            # Analyze home team players
+            for player in home_players:
+                prediction = self.predict_player_performance(player, away_id, away_abbr)
+                if prediction:
+                    predictions.append(prediction)
 
-            # For demo purposes, we'll use a hardcoded list of star players
-            # In production, you'd query this dynamically
-            sample_players = self._get_sample_players()
+            # Analyze away team players
+            for player in away_players:
+                prediction = self.predict_player_performance(player, home_id, home_abbr)
+                if prediction:
+                    predictions.append(prediction)
 
-            for player_info in sample_players:
-                player_id = player_info['id']
-                player_name = player_info['full_name']
-
-                # Determine which team the player plays for
-                # This is simplified - you'd need proper roster data
-                player_team_id = player_info.get('team_id')
-
-                if player_team_id == home_id:
-                    prediction = self.predict_player_performance(
-                        player_id,
-                        player_name,
-                        home_team.get('abbreviation', 'HOME'),
-                        away_id,
-                        away_team.get('abbreviation', 'AWAY')
-                    )
-                    if prediction:
-                        predictions.append(prediction)
-
-                elif player_team_id == away_id:
-                    prediction = self.predict_player_performance(
-                        player_id,
-                        player_name,
-                        away_team.get('abbreviation', 'AWAY'),
-                        home_id,
-                        home_team.get('abbreviation', 'HOME')
-                    )
-                    if prediction:
-                        predictions.append(prediction)
-
+        print(f"Generated {len(predictions)} predictions")
         return predictions
-
-    def _get_sample_players(self) -> List[Dict]:
-        """
-        Get a sample of active NBA players
-        This is a placeholder - in production you'd use proper roster data
-
-        Returns:
-            List of player dictionaries
-        """
-        all_players = players.get_active_players()
-
-        # Filter for known rebounders (this is just an example)
-        # In production, you'd have a more sophisticated selection process
-        return all_players[:50]  # Sample of 50 active players
 
 
 if __name__ == "__main__":
     import sys
-
-    # Check for diagnostic mode
-    if len(sys.argv) > 1 and sys.argv[1] == "--diagnose":
-        predictor = NBAPredictor(recent_games=5)
-        predictor.diagnose_api()
-        sys.exit(0)
 
     # Example usage
     predictor = NBAPredictor(recent_games=5)
@@ -638,13 +324,11 @@ if __name__ == "__main__":
 
     if not games:
         print("\n⚠️  No games scheduled for today")
-        print("\nTroubleshooting tips:")
-        print("1. Check if it's the NBA off-season (June - September)")
-        print("2. Verify your internet connection")
-        print("3. Run diagnostics: python nba_predictor.py --diagnose")
-        print("4. Try a specific game date during the season")
     else:
         print(f"\n✓ Found {len(games)} games today")
+        for game in games:
+            print(f"  {game['away_team']['abbreviation']} @ {game['home_team']['abbreviation']}")
+
         print("\nAnalyzing matchups...")
 
         predictions = predictor.analyze_todays_matchups()
